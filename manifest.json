@@ -1,7 +1,7 @@
 {
   "id": "flexible-notes",
   "name": "Flexible Notes",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minAppVersion": "1.5.0",
   "description": "Create or open user-defined note types using templates and flexible folder and filename patterns.",
   "author": "OpenAI",

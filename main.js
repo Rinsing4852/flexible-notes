@@ -1,4 +1,5 @@
 const {
+  Modal,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -139,37 +140,187 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
   }
 
   async handleProtocolRequest(params) {
-    const type = (params.type || "").trim();
-    const date = (params.date || "").trim();
+    const rawParams = this.stringifyUriParams(params);
+    const type = this.decodeUriValue(params.type || "").trim();
+    const date = this.decodeUriValue(params.date || "").trim();
+    const dateValidation = this.validateUriDate(date);
+
+    if (!dateValidation.ok) {
+      await this.handleUriError(`Invalid date: ${date}`, {
+        rawParams,
+        decodedType: type,
+        dateUsed: date,
+      });
+      return;
+    }
 
     if (!type) {
-      await this.handleError("URI", "Missing type parameter", {
-        action: "error",
-        errorMessage: "Use obsidian://flexible-notes?type=Daily%20Reflection",
+      await this.openNoteTypePicker(dateValidation.date, rawParams);
+      return;
+    }
+
+    const match = this.findNoteDefinitionMatch(type);
+    if (match.disabled) {
+      await this.handleUriError(`Note type is disabled: ${type}`, {
+        rawParams,
+        decodedType: type,
+        dateUsed: dateValidation.date,
+        matchedNoteTypeId: match.definition.id,
+        matchedNoteTypeName: match.definition.name,
       });
       return;
     }
 
-    const definition = this.findNoteDefinition(type);
-    if (!definition) {
-      await this.handleError(type, `No note type found for: ${type}`, {
-        action: "error",
-        errorMessage: `No note type found for: ${type}`,
+    if (!match.definition) {
+      await this.handleUriError(`Note type not found: ${type}`, {
+        rawParams,
+        decodedType: type,
+        dateUsed: dateValidation.date,
       });
       return;
     }
 
-    await this.createOrOpenNote(definition, { date });
+    await this.logUriAction({
+      rawParams,
+      decodedType: type,
+      dateUsed: dateValidation.date,
+      matchedNoteTypeId: match.definition.id,
+      matchedNoteTypeName: match.definition.name,
+      action: "run direct",
+    });
+    await this.createOrOpenNote(match.definition, {
+      date: dateValidation.date,
+      uriContext: {
+        rawParams,
+        decodedType: type,
+        dateUsed: dateValidation.date,
+        matchedNoteTypeId: match.definition.id,
+        matchedNoteTypeName: match.definition.name,
+      },
+    });
   }
 
-  findNoteDefinition(type) {
+  decodeUriValue(value) {
+    const text = String(value || "");
+    try {
+      return decodeURIComponent(text.replace(/\+/g, " "));
+    } catch (error) {
+      return text;
+    }
+  }
+
+  stringifyUriParams(params) {
+    return JSON.stringify(params || {});
+  }
+
+  validateUriDate(date) {
+    if (!date) return { ok: true, date: "" };
+    const parsed = moment(date, "YYYY-MM-DD", true);
+    if (!parsed.isValid()) return { ok: false, date };
+    return { ok: true, date: parsed.format("YYYY-MM-DD") };
+  }
+
+  findNoteDefinitionMatch(type) {
     const wanted = String(type).trim().toLowerCase();
-    return this.settings.noteDefinitions.find((def) => {
-      return (
-        def.enabled &&
-        (String(def.name || "").trim().toLowerCase() === wanted ||
-          String(def.id || "").trim().toLowerCase() === wanted)
-      );
+    const definition = this.settings.noteDefinitions.find((def) => {
+      return this.noteDefinitionMatches(def, wanted);
+    });
+
+    if (!definition) return { definition: null, disabled: false };
+    return { definition, disabled: !definition.enabled };
+  }
+
+  noteDefinitionMatches(definition, wanted) {
+    return (
+      String(definition.name || "").trim().toLowerCase() === wanted ||
+      String(definition.id || "").trim().toLowerCase() === wanted
+    );
+  }
+
+  getEnabledNoteDefinitions() {
+    return this.settings.noteDefinitions.filter((def) => def.enabled && def.name);
+  }
+
+  async openNoteTypePicker(date, rawParams) {
+    const enabledDefinitions = this.getEnabledNoteDefinitions();
+
+    if (enabledDefinitions.length === 0) {
+      await this.handleUriError("No enabled note types.", {
+        rawParams,
+        dateUsed: date,
+      });
+      return;
+    }
+
+    if (enabledDefinitions.length === 1) {
+      const definition = enabledDefinitions[0];
+      await this.logUriAction({
+        rawParams,
+        dateUsed: date,
+        matchedNoteTypeId: definition.id,
+        matchedNoteTypeName: definition.name,
+        action: "run single enabled note type",
+      });
+      await this.createOrOpenNote(definition, {
+        date,
+        uriContext: {
+          rawParams,
+          dateUsed: date,
+          matchedNoteTypeId: definition.id,
+          matchedNoteTypeName: definition.name,
+        },
+      });
+      return;
+    }
+
+    await this.logUriAction({
+      rawParams,
+      dateUsed: date,
+      action: "open picker",
+    });
+
+    new FlexibleNotesPickerModal(this.app, this, enabledDefinitions, date, rawParams).open();
+  }
+
+  async runPickedNoteType(definition, date, rawParams) {
+    await this.logUriAction({
+      rawParams,
+      dateUsed: date,
+      matchedNoteTypeId: definition.id,
+      matchedNoteTypeName: definition.name,
+      action: "run picker selection",
+    });
+    await this.createOrOpenNote(definition, {
+      date,
+      uriContext: {
+        rawParams,
+        dateUsed: date,
+        matchedNoteTypeId: definition.id,
+        matchedNoteTypeName: definition.name,
+      },
+    });
+  }
+
+  async handleUriError(message, details) {
+    await this.logUriAction({
+      ...details,
+      action: "error",
+      errorMessage: message,
+    });
+    new Notice(message);
+    if (this.settings.openLogOnError) {
+      await this.openDebugLog();
+    }
+  }
+
+  async logUriAction(details) {
+    await this.log("standard", "URI", details.action || "uri", {
+      rawUriParameters: details.rawParams || "",
+      decodedType: details.decodedType || "",
+      dateUsed: details.dateUsed || moment().format("YYYY-MM-DD"),
+      matchedNoteTypeId: details.matchedNoteTypeId || "",
+      matchedNoteTypeName: details.matchedNoteTypeName || "",
+      errorMessage: details.errorMessage || "",
     });
   }
 
@@ -353,6 +504,13 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (options.uriContext) {
+        await this.logUriAction({
+          ...options.uriContext,
+          action: "error",
+          errorMessage: message,
+        });
+      }
       await this.handleError(definition.name, message, {
         action: "error",
         resolvedTemplatePath,
@@ -446,6 +604,14 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
       lines.push(`- Error message: ${details.errorMessage}`);
     }
 
+    if (details.rawUriParameters) {
+      lines.push(`- Raw URI parameters: ${details.rawUriParameters}`);
+      lines.push(`- Decoded type: ${details.decodedType || ""}`);
+      lines.push(`- Date used: ${details.dateUsed || ""}`);
+      lines.push(`- Matched note type ID: ${details.matchedNoteTypeId || ""}`);
+      lines.push(`- Matched note type name: ${details.matchedNoteTypeName || ""}`);
+    }
+
     lines.push("");
 
     const exists = await this.app.vault.adapter.exists(logPath);
@@ -483,6 +649,40 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
     await this.openDebugLog();
   }
 };
+
+class FlexibleNotesPickerModal extends Modal {
+  constructor(app, plugin, noteDefinitions, date, rawParams) {
+    super(app);
+    this.plugin = plugin;
+    this.noteDefinitions = noteDefinitions;
+    this.date = date;
+    this.rawParams = rawParams;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("flexible-notes-picker");
+
+    contentEl.createEl("h2", { text: "Flexible Notes" });
+
+    const list = contentEl.createDiv({ cls: "flexible-notes-picker-list" });
+    for (const definition of this.noteDefinitions) {
+      const button = list.createEl("button", {
+        cls: "flexible-notes-picker-item",
+        text: definition.name,
+      });
+      button.addEventListener("click", async () => {
+        this.close();
+        await this.plugin.runPickedNoteType(definition, this.date, this.rawParams);
+      });
+    }
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
 
 class FlexibleNotesSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
@@ -583,6 +783,7 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
     section.createEl("h4", { text: def.name || `Note type ${index + 1}` });
 
     const errorEl = section.createDiv({ cls: "flexible-notes-error" });
+    errorEl.classList.add("is-hidden");
     const previewEl = section.createDiv({ cls: "flexible-notes-preview" });
 
     const draft = { ...def };

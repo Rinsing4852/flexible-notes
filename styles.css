@@ -28,3 +28,14 @@
   gap: 0.5rem;
   margin-top: 0.5rem;
 }
+
+.flexible-notes-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.flexible-notes-picker-item {
+  text-align: left;
+  width: 100%;
+}
