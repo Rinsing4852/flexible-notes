@@ -1,4 +1,4 @@
-# Flexible Notes v0.1.0
+# Flexible Notes v0.1.1
 
 A first version of an Obsidian plugin for creating or opening user-defined note types.
 
