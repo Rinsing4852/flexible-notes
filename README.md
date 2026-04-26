@@ -1,6 +1,6 @@
-# Flexible Notes v0.1.1
+# Flexible Notes v0.2.0
 
-A first version of an Obsidian plugin for creating or opening user-defined note types.
+An Obsidian plugin for creating or opening user-defined note types from settings, commands, or iOS Shortcuts.
 
 ## What it does
 
@@ -14,6 +14,7 @@ A first version of an Obsidian plugin for creating or opening user-defined note 
 - Creates missing folders automatically.
 - Opens today's note if it already exists.
 - Writes an optional markdown debug log in the vault.
+- Supports Obsidian URI automation for iOS Shortcuts and Siri.
 - Works without Templater.
 - Designed to stay mobile-friendly.
 
@@ -47,6 +48,16 @@ This creates:
 - Flexible Notes: open debug log
 - Flexible Notes: clear debug log
 
+## Shortcuts
+
+Run a note type from an Obsidian URI:
+
+`obsidian://flexible-notes?type=Daily%20Reflection`
+
+An optional date can be supplied in `YYYY-MM-DD` format:
+
+`obsidian://flexible-notes?type=Daily%20Reflection&date=2026-04-11`
+
 ## Install for testing
 
 1. Create a folder in your vault:
@@ -63,8 +74,8 @@ This creates:
 
 ## Notes
 
-This is intentionally a v1:
+This is intentionally focused:
 - no calendar logic
 - no Templater integration
-- no timed automation
+- no scheduling engine
 - no fancy template browser

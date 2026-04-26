@@ -1,1 +1,30 @@
-/* Intentionally minimal for v0.1.0 */
+.flexible-notes-section {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  margin: 1rem 0;
+  padding: 1rem;
+}
+
+.flexible-notes-section h4 {
+  margin-top: 0;
+}
+
+.flexible-notes-preview {
+  color: var(--text-muted);
+  margin-bottom: 0.75rem;
+}
+
+.flexible-notes-error {
+  color: var(--text-error);
+  margin-bottom: 0.75rem;
+}
+
+.flexible-notes-error.is-hidden {
+  display: none;
+}
+
+.flexible-notes-confirm {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}

@@ -1,5 +1,4 @@
 const {
-  App,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -40,8 +39,12 @@ const DEFAULT_SETTINGS = {
   ],
 };
 
+const TOKEN_HELP =
+  "Available tokens: {{date}} -> 2026-04-11, {{year}} -> 2026, {{month}} -> April, {{day}} -> 11";
+
 module.exports = class FlexibleNotesPlugin extends Plugin {
   async onload() {
+    this.noteCommandIds = [];
     await this.loadSettings();
 
     this.addSettingTab(new FlexibleNotesSettingTab(this.app, this));
@@ -62,55 +65,167 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
       },
     });
 
-    this.registerNoteTypeCommands();
+    this.registerObsidianProtocolHandler("flexible-notes", async (params) => {
+      await this.handleProtocolRequest(params || {});
+    });
+
+    this.refreshNoteTypeCommands();
   }
 
-  onunload() {}
+  onunload() {
+    this.clearNoteTypeCommands();
+  }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const saved = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, saved || {});
 
     if (!Array.isArray(this.settings.noteDefinitions)) {
-      this.settings.noteDefinitions = [];
+      this.settings.noteDefinitions = DEFAULT_SETTINGS.noteDefinitions.map((def) => ({ ...def }));
     }
 
     for (const def of this.settings.noteDefinitions) {
-      if (!def.id) def.id = this.makeId(def.name || "note-type");
-      if (typeof def.enabled !== "boolean") def.enabled = true;
-      if (!def.folderPattern) def.folderPattern = "{{year}}/{{month}}";
-      if (!def.filenamePattern) def.filenamePattern = "{{day}}";
-      if (!def.ifExists) def.ifExists = "open";
-      if (typeof def.openAfterCreate !== "boolean") def.openAfterCreate = true;
+      this.normalizeDefinitionForStorage(def);
     }
   }
 
   async saveSettings() {
     await this.saveData(this.settings);
+    this.refreshNoteTypeCommands();
   }
 
-  registerNoteTypeCommands() {
+  normalizeDefinitionForStorage(def) {
+    if (!def.id) def.id = this.makeId(def.name || "note-type");
+    if (typeof def.enabled !== "boolean") def.enabled = true;
+    if (typeof def.name !== "string") def.name = "";
+    if (typeof def.templatePath !== "string") def.templatePath = "";
+    if (typeof def.destinationRoot !== "string") def.destinationRoot = "";
+    if (typeof def.folderPattern !== "string") def.folderPattern = "";
+    if (typeof def.filenamePattern !== "string") def.filenamePattern = "";
+    if (!["open", "skip", "duplicate"].includes(def.ifExists)) def.ifExists = "open";
+    if (typeof def.openAfterCreate !== "boolean") def.openAfterCreate = true;
+
+    def.templatePath = this.ensureMarkdownPath(this.normalizeVaultPath(def.templatePath));
+    def.destinationRoot = this.normalizeVaultPath(def.destinationRoot);
+    def.folderPattern = this.normalizeVaultPath(def.folderPattern);
+    def.filenamePattern = this.normalizeVaultPath(def.filenamePattern);
+  }
+
+  clearNoteTypeCommands() {
+    for (const id of this.noteCommandIds || []) {
+      if (this.app.commands && typeof this.app.commands.removeCommand === "function") {
+        this.app.commands.removeCommand(id);
+      }
+    }
+    this.noteCommandIds = [];
+  }
+
+  refreshNoteTypeCommands() {
+    this.clearNoteTypeCommands();
+
     for (const def of this.settings.noteDefinitions) {
       if (!def.enabled || !def.name) continue;
 
+      const id = `create-open-${def.id}`;
       this.addCommand({
-        id: `create-open-${def.id}`,
+        id,
         name: `Create or open ${def.name}`,
         callback: async () => {
           await this.createOrOpenNote(def);
         },
       });
+      this.noteCommandIds.push(id);
     }
   }
 
-  makeId(input) {
-    return String(input || "note-type")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || `note-type-${Date.now()}`;
+  async handleProtocolRequest(params) {
+    const type = (params.type || "").trim();
+    const date = (params.date || "").trim();
+
+    if (!type) {
+      await this.handleError("URI", "Missing type parameter", {
+        action: "error",
+        errorMessage: "Use obsidian://flexible-notes?type=Daily%20Reflection",
+      });
+      return;
+    }
+
+    const definition = this.findNoteDefinition(type);
+    if (!definition) {
+      await this.handleError(type, `No note type found for: ${type}`, {
+        action: "error",
+        errorMessage: `No note type found for: ${type}`,
+      });
+      return;
+    }
+
+    await this.createOrOpenNote(definition, { date });
   }
 
-  getTodayContext(noteTypeName) {
-    const now = moment();
+  findNoteDefinition(type) {
+    const wanted = String(type).trim().toLowerCase();
+    return this.settings.noteDefinitions.find((def) => {
+      return (
+        def.enabled &&
+        (String(def.name || "").trim().toLowerCase() === wanted ||
+          String(def.id || "").trim().toLowerCase() === wanted)
+      );
+    });
+  }
+
+  makeId(input) {
+    return (
+      String(input || "note-type")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "") || `note-type-${Date.now()}`
+    );
+  }
+
+  normalizeVaultPath(input) {
+    return normalizePath(String(input || "").trim().replace(/\\/g, "/")).replace(/^\/+/, "");
+  }
+
+  ensureMarkdownPath(input) {
+    if (!input) return "";
+    return input.toLowerCase().endsWith(".md") ? input : `${input}.md`;
+  }
+
+  validateVaultPath(path, label, options = {}) {
+    const normalized = options.markdown ? this.ensureMarkdownPath(this.normalizeVaultPath(path)) : this.normalizeVaultPath(path);
+    if (!normalized) return { ok: false, path: normalized, message: `${label} is required.` };
+    if (normalized.includes("//")) return { ok: false, path: normalized, message: `${label} contains an empty folder segment.` };
+    if (normalized.split("/").some((part) => part === "." || part === "..")) {
+      return { ok: false, path: normalized, message: `${label} cannot contain . or ... segments.` };
+    }
+    if (/[:*?"<>|]/.test(normalized)) {
+      return { ok: false, path: normalized, message: `${label} contains invalid characters.` };
+    }
+    return { ok: true, path: normalized };
+  }
+
+  async validateTemplatePath(path) {
+    const result = this.validateVaultPath(path, "Template path", { markdown: true });
+    if (!result.ok) return result;
+
+    const file = this.app.vault.getAbstractFileByPath(result.path);
+    if (!(file instanceof TFile)) {
+      return { ok: false, path: result.path, message: `Template not found: ${result.path}` };
+    }
+
+    return result;
+  }
+
+  validateDestinationRoot(path) {
+    return this.validateVaultPath(path, "Destination root");
+  }
+
+  getDateContext(noteTypeName, dateInput) {
+    const now = dateInput ? moment(dateInput, "YYYY-MM-DD", true) : moment();
+    if (!now.isValid()) {
+      throw new Error(`Invalid date: ${dateInput}. Use YYYY-MM-DD.`);
+    }
+
     return {
       date: now.format("YYYY-MM-DD"),
       year: now.format("YYYY"),
@@ -142,38 +257,51 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
   }
 
   buildNotePath(definition, context) {
-    const destinationRoot = this.applyTokens(definition.destinationRoot, context).trim();
-    const folderPattern = this.applyTokens(definition.folderPattern, context).trim();
-    let filename = this.applyTokens(definition.filenamePattern, context).trim();
+    const destinationRoot = this.validateDestinationRoot(definition.destinationRoot);
+    if (!destinationRoot.ok) throw new Error(destinationRoot.message);
+    if (!definition.folderPattern) throw new Error(`Folder pattern is required for ${definition.name}.`);
+    if (!definition.filenamePattern) throw new Error(`Filename pattern is required for ${definition.name}.`);
 
-    if (!filename) filename = context.day;
-    if (!filename.endsWith(".md")) filename += ".md";
+    const folderPattern = this.normalizeVaultPath(this.applyTokens(definition.folderPattern, context));
+    let filename = this.normalizeVaultPath(this.applyTokens(definition.filenamePattern, context));
+    filename = this.ensureMarkdownPath(filename);
 
-    const folderPath = [destinationRoot, folderPattern].filter(Boolean).join("/");
-    const fullPath = normalizePath([folderPath, filename].filter(Boolean).join("/"));
+    const folderValidation = this.validateVaultPath(folderPattern || destinationRoot.path, "Folder path");
+    if (!folderValidation.ok) throw new Error(folderValidation.message);
 
-    return {
-      folderPath: normalizePath(folderPath),
-      fullPath,
-      filename,
-    };
+    const filenameValidation = this.validateVaultPath(filename, "Filename", { markdown: true });
+    if (!filenameValidation.ok) throw new Error(filenameValidation.message);
+
+    const folderPath = this.normalizeVaultPath([destinationRoot.path, folderPattern].filter(Boolean).join("/"));
+    const fullPath = this.normalizeVaultPath([folderPath, filenameValidation.path].filter(Boolean).join("/"));
+
+    return { folderPath, fullPath, filename: filenameValidation.path };
+  }
+
+  buildPreviewPath(definition) {
+    const context = this.getDateContext(definition.name || "Daily Reflection", "2026-04-11");
+    const { fullPath } = this.buildNotePath(definition, context);
+    return fullPath;
   }
 
   async ensureFolder(folderPath) {
-    const parts = normalizePath(folderPath).split("/").filter(Boolean);
+    const normalized = this.normalizeVaultPath(folderPath);
+    if (!normalized) return;
+
+    const parts = normalized.split("/").filter(Boolean);
     let current = "";
 
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
-      const exists = await this.app.vault.adapter.exists(normalizePath(current));
+      const exists = await this.app.vault.adapter.exists(current);
       if (!exists) {
-        await this.app.vault.createFolder(normalizePath(current));
+        await this.app.vault.createFolder(current);
       }
     }
   }
 
   async getTemplateContent(templatePath, context) {
-    const resolvedTemplatePath = normalizePath(this.applyTokens(templatePath, context));
+    const resolvedTemplatePath = this.ensureMarkdownPath(this.normalizeVaultPath(this.applyTokens(templatePath, context)));
     const templateFile = this.app.vault.getAbstractFileByPath(resolvedTemplatePath);
 
     if (!(templateFile instanceof TFile)) {
@@ -187,31 +315,36 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
     };
   }
 
-  async createOrOpenNote(definition) {
-    const context = this.getTodayContext(definition.name);
-    const { folderPath, fullPath } = this.buildNotePath(definition, context);
+  async createOrOpenNote(definition, options = {}) {
+    let context;
+    let pathInfo = {};
+    let resolvedTemplatePath = "";
 
     try {
-      await this.log("verbose", definition.name, "Resolved note path", {
-        folderPath,
-        fullPath,
-        templatePath: definition.templatePath,
+      context = this.getDateContext(definition.name, options.date);
+      pathInfo = this.buildNotePath(definition, context);
+      resolvedTemplatePath = this.ensureMarkdownPath(this.normalizeVaultPath(this.applyTokens(definition.templatePath, context)));
+
+      await this.log("verbose", definition.name, "resolved", {
+        resolvedTemplatePath,
+        resolvedDestinationPath: pathInfo.fullPath,
       });
 
-      await this.ensureFolder(folderPath);
+      await this.ensureFolder(pathInfo.folderPath);
 
-      const existing = this.app.vault.getAbstractFileByPath(fullPath);
+      const existing = this.app.vault.getAbstractFileByPath(pathInfo.fullPath);
       if (existing instanceof TFile) {
-        await this.handleExisting(existing, definition, fullPath);
+        await this.handleExisting(existing, definition, pathInfo.fullPath, resolvedTemplatePath, context);
         return;
       }
 
       const template = await this.getTemplateContent(definition.templatePath, context);
-      const file = await this.app.vault.create(fullPath, template.content);
+      resolvedTemplatePath = template.resolvedTemplatePath;
+      const file = await this.app.vault.create(pathInfo.fullPath, template.content);
 
-      await this.log("standard", definition.name, "Created file", {
-        path: fullPath,
-        template: template.resolvedTemplatePath,
+      await this.log("standard", definition.name, "created", {
+        resolvedTemplatePath,
+        resolvedDestinationPath: pathInfo.fullPath,
       });
 
       new Notice(`Created ${definition.name}`);
@@ -220,35 +353,34 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await this.log("errors", definition.name, "ERROR", {
-        message,
-        path: fullPath,
-        templatePath: definition.templatePath,
+      await this.handleError(definition.name, message, {
+        action: "error",
+        resolvedTemplatePath,
+        resolvedDestinationPath: pathInfo.fullPath || "",
+        errorMessage: message,
       });
-      new Notice(`Flexible Notes error: ${message}`);
-      if (this.settings.openLogOnError) {
-        await this.openDebugLog();
-      }
     }
   }
 
-  async handleExisting(existingFile, definition, fullPath) {
-    const mode = definition.ifExists || "open";
+  async handleExisting(existingFile, definition, fullPath, resolvedTemplatePath, context) {
+    const mode = definition.ifExists;
 
     if (mode === "skip") {
-      await this.log("standard", definition.name, "Skipped existing file", { path: fullPath });
+      await this.log("standard", definition.name, "skipped", {
+        resolvedTemplatePath,
+        resolvedDestinationPath: fullPath,
+      });
       new Notice(`${definition.name} already exists`);
       return;
     }
 
     if (mode === "duplicate") {
       const duplicatePath = await this.findDuplicatePath(fullPath);
-      const context = this.getTodayContext(definition.name);
       const template = await this.getTemplateContent(definition.templatePath, context);
       const duplicate = await this.app.vault.create(duplicatePath, template.content);
-      await this.log("standard", definition.name, "Created duplicate file", {
-        path: duplicatePath,
-        sourcePath: fullPath,
+      await this.log("standard", definition.name, "created duplicate", {
+        resolvedTemplatePath: template.resolvedTemplatePath,
+        resolvedDestinationPath: duplicatePath,
       });
       new Notice(`Created duplicate ${definition.name}`);
       if (definition.openAfterCreate) {
@@ -257,7 +389,10 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
       return;
     }
 
-    await this.log("standard", definition.name, "Opened existing file", { path: fullPath });
+    await this.log("standard", definition.name, "opened", {
+      resolvedTemplatePath,
+      resolvedDestinationPath: fullPath,
+    });
     new Notice(`Opened existing ${definition.name}`);
     await this.app.workspace.getLeaf(true).openFile(existingFile);
   }
@@ -272,7 +407,15 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
       candidate = `${base} (${count}).md`;
     }
 
-    return normalizePath(candidate);
+    return this.normalizeVaultPath(candidate);
+  }
+
+  async handleError(noteType, message, details = {}) {
+    await this.log("errors", noteType, "error", details);
+    new Notice(`Flexible Notes error: ${message}`);
+    if (this.settings.openLogOnError) {
+      await this.openDebugLog();
+    }
   }
 
   async log(level, noteType, action, details = {}) {
@@ -283,7 +426,7 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
     const current = order[level] || 2;
     if (current > configured) return;
 
-    const logPath = normalizePath(this.settings.debugLogPath || DEFAULT_SETTINGS.debugLogPath);
+    const logPath = this.ensureMarkdownPath(this.normalizeVaultPath(this.settings.debugLogPath || DEFAULT_SETTINGS.debugLogPath));
     const parent = logPath.split("/").slice(0, -1).join("/");
     if (parent) {
       await this.ensureFolder(parent);
@@ -291,30 +434,30 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
 
     const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
     const lines = [
-      `## ${timestamp} — ${noteType}`,
+      `## ${timestamp}`,
+      `- Timestamp: ${timestamp}`,
+      `- Note type: ${noteType}`,
       `- Action: ${action}`,
-      ...Object.entries(details).map(([k, v]) => `- ${this.toTitleCase(k)}: ${String(v)}`),
-      "",
+      `- Resolved template path: ${details.resolvedTemplatePath || ""}`,
+      `- Resolved destination path: ${details.resolvedDestinationPath || ""}`,
     ];
+
+    if (details.errorMessage) {
+      lines.push(`- Error message: ${details.errorMessage}`);
+    }
+
+    lines.push("");
 
     const exists = await this.app.vault.adapter.exists(logPath);
     if (!exists) {
-      await this.app.vault.adapter.write(logPath, lines.join("\n"));
-      return;
+      await this.app.vault.adapter.write(logPath, "# Flexible Notes Debug Log\n\n");
     }
 
     await this.app.vault.adapter.append(logPath, lines.join("\n"));
   }
 
-  toTitleCase(value) {
-    return String(value)
-      .replace(/([A-Z])/g, " $1")
-      .replace(/^./, (s) => s.toUpperCase())
-      .trim();
-  }
-
   async openDebugLog() {
-    const logPath = normalizePath(this.settings.debugLogPath || DEFAULT_SETTINGS.debugLogPath);
+    const logPath = this.ensureMarkdownPath(this.normalizeVaultPath(this.settings.debugLogPath || DEFAULT_SETTINGS.debugLogPath));
     const parent = logPath.split("/").slice(0, -1).join("/");
     if (parent) {
       await this.ensureFolder(parent);
@@ -329,19 +472,13 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
   }
 
   async clearDebugLog() {
-    const logPath = normalizePath(this.settings.debugLogPath || DEFAULT_SETTINGS.debugLogPath);
+    const logPath = this.ensureMarkdownPath(this.normalizeVaultPath(this.settings.debugLogPath || DEFAULT_SETTINGS.debugLogPath));
     const parent = logPath.split("/").slice(0, -1).join("/");
     if (parent) {
       await this.ensureFolder(parent);
     }
 
-    const exists = await this.app.vault.adapter.exists(logPath);
-    if (!exists) {
-      await this.app.vault.adapter.write(logPath, "# Flexible Notes Debug Log\n\n");
-    } else {
-      await this.app.vault.adapter.write(logPath, "# Flexible Notes Debug Log\n\n");
-    }
-
+    await this.app.vault.adapter.write(logPath, "# Flexible Notes Debug Log\n\n");
     new Notice("Flexible Notes debug log cleared");
     await this.openDebugLog();
   }
@@ -375,10 +512,12 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
       .setName("Debug log path")
       .setDesc("Vault-relative markdown path for the debug log.")
       .addText((text) =>
-        text.setPlaceholder("Journal/_System/FlexibleNotes Log.md")
+        text
+          .setPlaceholder("Journal/_System/FlexibleNotes Log.md")
           .setValue(this.plugin.settings.debugLogPath)
           .onChange(async (value) => {
-            this.plugin.settings.debugLogPath = value.trim() || DEFAULT_SETTINGS.debugLogPath;
+            const path = this.plugin.ensureMarkdownPath(this.plugin.normalizeVaultPath(value || DEFAULT_SETTINGS.debugLogPath));
+            this.plugin.settings.debugLogPath = path;
             await this.plugin.saveSettings();
           })
       );
@@ -400,7 +539,7 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Open debug log on error")
-      .setDesc("Useful on iPhone when something breaks and you want the explanation immediately.")
+      .setDesc("Automatically open the log when note creation fails.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.openLogOnError).onChange(async (value) => {
           this.plugin.settings.openLogOnError = value;
@@ -411,126 +550,191 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
     containerEl.createEl("h3", { text: "Note types" });
 
     this.plugin.settings.noteDefinitions.forEach((def, index) => {
-      const section = containerEl.createDiv({ cls: "flexible-notes-section" });
-      section.createEl("h4", { text: def.name || `Note type ${index + 1}` });
-
-      new Setting(section)
-        .setName("Enabled")
-        .addToggle((toggle) =>
-          toggle.setValue(def.enabled).onChange(async (value) => {
-            def.enabled = value;
-            await this.plugin.saveSettings();
-          })
-        );
-
-      new Setting(section)
-        .setName("Name")
-        .addText((text) =>
-          text.setValue(def.name || "").onChange(async (value) => {
-            def.name = value;
-            def.id = this.plugin.makeId(value || def.id || `note-type-${index + 1}`);
-            await this.plugin.saveSettings();
-          })
-        );
-
-      new Setting(section)
-        .setName("Template path")
-        .setDesc("Vault-relative markdown file.")
-        .addText((text) =>
-          text.setValue(def.templatePath || "").onChange(async (value) => {
-            def.templatePath = value;
-            await this.plugin.saveSettings();
-          })
-        );
-
-      new Setting(section)
-        .setName("Destination root")
-        .setDesc("Example: Journal/Daily Reflection")
-        .addText((text) =>
-          text.setValue(def.destinationRoot || "").onChange(async (value) => {
-            def.destinationRoot = value;
-            await this.plugin.saveSettings();
-          })
-        );
-
-      new Setting(section)
-        .setName("Folder pattern")
-        .setDesc("Example: {{year}}/{{month}}")
-        .addText((text) =>
-          text.setValue(def.folderPattern || "").onChange(async (value) => {
-            def.folderPattern = value || "{{year}}/{{month}}";
-            await this.plugin.saveSettings();
-          })
-        );
-
-      new Setting(section)
-        .setName("Filename pattern")
-        .setDesc("Example: {{day}} or {{date}}")
-        .addText((text) =>
-          text.setValue(def.filenamePattern || "").onChange(async (value) => {
-            def.filenamePattern = value || "{{day}}";
-            await this.plugin.saveSettings();
-          })
-        );
-
-      new Setting(section)
-        .setName("If file exists")
-        .addDropdown((dropdown) =>
-          dropdown
-            .addOption("open", "Open existing")
-            .addOption("skip", "Skip")
-            .addOption("duplicate", "Create duplicate")
-            .setValue(def.ifExists || "open")
-            .onChange(async (value) => {
-              def.ifExists = value;
-              await this.plugin.saveSettings();
-            })
-        );
-
-      new Setting(section)
-        .setName("Open after create")
-        .addToggle((toggle) =>
-          toggle.setValue(def.openAfterCreate).onChange(async (value) => {
-            def.openAfterCreate = value;
-            await this.plugin.saveSettings();
-          })
-        );
-
-      new Setting(section)
-        .setName("Delete this note type")
-        .setDesc("Removes it from settings. You may need to reload the plugin for command names to refresh.")
-        .addButton((button) =>
-          button.setButtonText("Delete").setWarning().onClick(async () => {
-            this.plugin.settings.noteDefinitions.splice(index, 1);
-            await this.plugin.saveSettings();
-            this.display();
-          })
-        );
+      this.renderNoteType(containerEl, def, index);
     });
 
     new Setting(containerEl)
       .setName("Add note type")
       .setDesc("Creates a new flexible note definition.")
       .addButton((button) =>
-        button.setButtonText("Add").setCta().onClick(async () => {
-          this.plugin.settings.noteDefinitions.push({
-            id: `note-type-${Date.now()}`,
-            enabled: true,
-            name: "New Note Type",
-            templatePath: "Templates/New Note Type.md",
-            destinationRoot: "Journal/New Note Type",
-            folderPattern: "{{year}}/{{month}}",
-            filenamePattern: "{{day}}",
-            ifExists: "open",
-            openAfterCreate: true,
-          });
-          await this.plugin.saveSettings();
-          this.display();
+        button
+          .setButtonText("Add")
+          .setCta()
+          .onClick(async () => {
+            this.plugin.settings.noteDefinitions.push({
+              id: `note-type-${Date.now()}`,
+              enabled: true,
+              name: "New Note Type",
+              templatePath: "Templates/New Note Type.md",
+              destinationRoot: "Journal/New Note Type",
+              folderPattern: "{{year}}/{{month}}",
+              filenamePattern: "{{day}}",
+              ifExists: "open",
+              openAfterCreate: true,
+            });
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
+  }
+
+  renderNoteType(containerEl, def, index) {
+    const section = containerEl.createDiv({ cls: "flexible-notes-section" });
+    section.createEl("h4", { text: def.name || `Note type ${index + 1}` });
+
+    const errorEl = section.createDiv({ cls: "flexible-notes-error" });
+    const previewEl = section.createDiv({ cls: "flexible-notes-preview" });
+
+    const draft = { ...def };
+    const showError = (message) => {
+      errorEl.setText(message || "");
+      errorEl.classList.toggle("is-hidden", !message);
+    };
+    const updatePreview = () => {
+      try {
+        previewEl.setText(`Example output: ${this.plugin.buildPreviewPath(draft)}`);
+      } catch (error) {
+        previewEl.setText("Example output: cannot resolve current settings");
+      }
+    };
+    const saveDraft = async () => {
+      Object.assign(def, draft);
+      this.plugin.normalizeDefinitionForStorage(def);
+      await this.plugin.saveSettings();
+      updatePreview();
+    };
+
+    updatePreview();
+
+    new Setting(section)
+      .setName("Enabled")
+      .addToggle((toggle) =>
+        toggle.setValue(def.enabled).onChange(async (value) => {
+          draft.enabled = value;
+          await saveDraft();
         })
       );
 
-    containerEl.createEl("p", {
-      text: "Note: after renaming or adding note types, reload the plugin so command names refresh cleanly.",
-    });
+    new Setting(section)
+      .setName("Name")
+      .addText((text) =>
+        text.setValue(def.name || "").onChange(async (value) => {
+          draft.name = value.trim();
+          draft.id = this.plugin.makeId(draft.name || def.id || `note-type-${index + 1}`);
+          await saveDraft();
+          showError("");
+        })
+      );
+
+    new Setting(section)
+      .setName("Template path")
+      .setDesc("Vault-relative markdown file. Any .md file can be used.")
+      .addText((text) =>
+        text.setValue(def.templatePath || "").onChange(async (value) => {
+          draft.templatePath = this.plugin.ensureMarkdownPath(this.plugin.normalizeVaultPath(value));
+          const result = await this.plugin.validateTemplatePath(draft.templatePath);
+          updatePreview();
+          if (!result.ok) {
+            showError(result.message);
+            return;
+          }
+          draft.templatePath = result.path;
+          await saveDraft();
+          showError("");
+        })
+      );
+
+    new Setting(section)
+      .setName("Destination root")
+      .setDesc("Vault-relative folder path. Missing folders are created automatically.")
+      .addText((text) =>
+        text.setValue(def.destinationRoot || "").onChange(async (value) => {
+          draft.destinationRoot = this.plugin.normalizeVaultPath(value);
+          const result = this.plugin.validateDestinationRoot(draft.destinationRoot);
+          updatePreview();
+          if (!result.ok) {
+            showError(result.message);
+            return;
+          }
+          draft.destinationRoot = result.path;
+          await saveDraft();
+          showError("");
+        })
+      );
+
+    new Setting(section)
+      .setName("Folder pattern")
+      .setDesc(TOKEN_HELP)
+      .addText((text) =>
+        text.setValue(def.folderPattern || "").onChange(async (value) => {
+          draft.folderPattern = this.plugin.normalizeVaultPath(value);
+          updatePreview();
+          if (!draft.folderPattern) {
+            showError("Folder pattern is required.");
+            return;
+          }
+          await saveDraft();
+          showError("");
+        })
+      );
+
+    new Setting(section)
+      .setName("Filename pattern")
+      .setDesc(TOKEN_HELP)
+      .addText((text) =>
+        text.setValue(def.filenamePattern || "").onChange(async (value) => {
+          draft.filenamePattern = this.plugin.normalizeVaultPath(value);
+          updatePreview();
+          if (!draft.filenamePattern) {
+            showError("Filename pattern is required.");
+            return;
+          }
+          await saveDraft();
+          showError("");
+        })
+      );
+
+    new Setting(section)
+      .setName("If file exists")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("open", "Open existing")
+          .addOption("skip", "Skip")
+          .addOption("duplicate", "Create duplicate")
+          .setValue(def.ifExists)
+          .onChange(async (value) => {
+            draft.ifExists = value;
+            await saveDraft();
+          })
+      );
+
+    new Setting(section)
+      .setName("Open after create")
+      .addToggle((toggle) =>
+        toggle.setValue(def.openAfterCreate).onChange(async (value) => {
+          draft.openAfterCreate = value;
+          await saveDraft();
+        })
+      );
+
+    const deleteSetting = new Setting(section)
+      .setName("Delete this note type")
+      .setDesc("Removes it from settings.")
+      .addButton((button) =>
+        button
+          .setButtonText("Delete")
+          .setWarning()
+          .onClick(() => {
+            deleteSetting.settingEl.empty();
+            deleteSetting.settingEl.createDiv({ text: "Are you sure you want to delete this note type?" });
+            const controls = deleteSetting.settingEl.createDiv({ cls: "flexible-notes-confirm" });
+            controls.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.display());
+            controls.createEl("button", { text: "Delete", cls: "mod-warning" }).addEventListener("click", async () => {
+              this.plugin.settings.noteDefinitions.splice(index, 1);
+              await this.plugin.saveSettings();
+              this.display();
+            });
+          })
+      );
   }
 }
