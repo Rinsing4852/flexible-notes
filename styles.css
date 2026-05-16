@@ -35,7 +35,28 @@
   gap: 0.5rem;
 }
 
+.flexible-notes-picker-search {
+  margin-bottom: 0.75rem;
+  width: 100%;
+}
+
 .flexible-notes-picker-item {
   text-align: left;
   width: 100%;
+}
+
+.flexible-notes-picker-name {
+  font-weight: 600;
+}
+
+.flexible-notes-picker-template,
+.flexible-notes-picker-destination,
+.flexible-notes-picker-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  margin-top: 0.25rem;
+}
+
+.flexible-notes-picker-empty.is-hidden {
+  display: none;
 }

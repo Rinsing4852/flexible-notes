@@ -1,4 +1,4 @@
-# Flexible Notes v0.2.1
+# Flexible Notes v0.2.2
 
 An Obsidian plugin for creating or opening user-defined note types from settings, commands, or iOS Shortcuts.
 
@@ -57,6 +57,8 @@ Run a note type from an Obsidian URI:
 Open the mobile-friendly note type picker:
 
 `obsidian://flexible-notes`
+
+The picker includes search across note type name, template path, and destination folder.
 
 An optional date can be supplied in `YYYY-MM-DD` format:
 

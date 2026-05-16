@@ -6,6 +6,7 @@ const {
   Setting,
   normalizePath,
   TFile,
+  TFolder,
   moment,
 } = require("obsidian");
 
@@ -90,9 +91,11 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
     }
   }
 
-  async saveSettings() {
+  async saveSettings(options = {}) {
     await this.saveData(this.settings);
-    this.refreshNoteTypeCommands();
+    if (options.refreshCommands !== false) {
+      this.refreshNoteTypeCommands();
+    }
   }
 
   normalizeDefinitionForStorage(def) {
@@ -222,12 +225,18 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
 
   findNoteDefinitionMatch(type) {
     const wanted = String(type).trim().toLowerCase();
-    const definition = this.settings.noteDefinitions.find((def) => {
+    const enabledDefinition = this.settings.noteDefinitions.find((def) => {
+      return def.enabled && this.noteDefinitionMatches(def, wanted);
+    });
+
+    if (enabledDefinition) return { definition: enabledDefinition, disabled: false };
+
+    const disabledDefinition = this.settings.noteDefinitions.find((def) => {
       return this.noteDefinitionMatches(def, wanted);
     });
 
-    if (!definition) return { definition: null, disabled: false };
-    return { definition, disabled: !definition.enabled };
+    if (!disabledDefinition) return { definition: null, disabled: false };
+    return { definition: disabledDefinition, disabled: true };
   }
 
   noteDefinitionMatches(definition, wanted) {
@@ -447,6 +456,12 @@ module.exports = class FlexibleNotesPlugin extends Plugin {
       const exists = await this.app.vault.adapter.exists(current);
       if (!exists) {
         await this.app.vault.createFolder(current);
+        continue;
+      }
+
+      const existing = this.app.vault.getAbstractFileByPath(current);
+      if (!(existing instanceof TFolder)) {
+        throw new Error(`Folder path conflicts with an existing file: ${current}`);
       }
     }
   }
@@ -666,21 +681,69 @@ class FlexibleNotesPickerModal extends Modal {
 
     contentEl.createEl("h2", { text: "Flexible Notes" });
 
+    const search = contentEl.createEl("input", {
+      cls: "flexible-notes-picker-search",
+      attr: {
+        type: "search",
+        placeholder: "Search note types",
+      },
+    });
     const list = contentEl.createDiv({ cls: "flexible-notes-picker-list" });
-    for (const definition of this.noteDefinitions) {
-      const button = list.createEl("button", {
-        cls: "flexible-notes-picker-item",
-        text: definition.name,
+    const empty = contentEl.createDiv({
+      cls: "flexible-notes-picker-empty",
+      text: "No matching note types.",
+    });
+
+    const render = () => {
+      const query = search.value.trim().toLowerCase();
+      const matches = this.noteDefinitions.filter((definition) => {
+        return this.getSearchText(definition).includes(query);
       });
-      button.addEventListener("click", async () => {
-        this.close();
-        await this.plugin.runPickedNoteType(definition, this.date, this.rawParams);
-      });
-    }
+
+      list.empty();
+      empty.classList.toggle("is-hidden", matches.length > 0);
+
+      for (const definition of matches) {
+        const button = list.createEl("button", {
+          cls: "flexible-notes-picker-item",
+        });
+        button.createDiv({
+          cls: "flexible-notes-picker-name",
+          text: definition.name,
+        });
+        button.createDiv({
+          cls: "flexible-notes-picker-template",
+          text: `Template: ${definition.templatePath || "Not set"}`,
+        });
+        button.createDiv({
+          cls: "flexible-notes-picker-destination",
+          text: `Destination: ${definition.destinationRoot || "Not set"}`,
+        });
+        button.addEventListener("click", async () => {
+          this.close();
+          await this.plugin.runPickedNoteType(definition, this.date, this.rawParams);
+        });
+      }
+    };
+
+    search.addEventListener("input", render);
+    render();
+    window.setTimeout(() => search.focus(), 50);
   }
 
   onClose() {
     this.contentEl.empty();
+  }
+
+  getSearchText(definition) {
+    return [
+      definition.name,
+      definition.id,
+      definition.templatePath,
+      definition.destinationRoot,
+    ]
+      .join(" ")
+      .toLowerCase();
   }
 }
 
@@ -704,7 +767,7 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.debugEnabled).onChange(async (value) => {
           this.plugin.settings.debugEnabled = value;
-          await this.plugin.saveSettings();
+          await this.plugin.saveSettings({ refreshCommands: false });
         })
       );
 
@@ -718,7 +781,7 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             const path = this.plugin.ensureMarkdownPath(this.plugin.normalizeVaultPath(value || DEFAULT_SETTINGS.debugLogPath));
             this.plugin.settings.debugLogPath = path;
-            await this.plugin.saveSettings();
+            await this.plugin.saveSettings({ refreshCommands: false });
           })
       );
 
@@ -733,7 +796,7 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.debugLevel)
           .onChange(async (value) => {
             this.plugin.settings.debugLevel = value;
-            await this.plugin.saveSettings();
+            await this.plugin.saveSettings({ refreshCommands: false });
           })
       );
 
@@ -743,7 +806,7 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.openLogOnError).onChange(async (value) => {
           this.plugin.settings.openLogOnError = value;
-          await this.plugin.saveSettings();
+          await this.plugin.saveSettings({ refreshCommands: false });
         })
       );
 
@@ -798,10 +861,10 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
         previewEl.setText("Example output: cannot resolve current settings");
       }
     };
-    const saveDraft = async () => {
+    const saveDraft = async (options = {}) => {
       Object.assign(def, draft);
       this.plugin.normalizeDefinitionForStorage(def);
-      await this.plugin.saveSettings();
+      await this.plugin.saveSettings(options);
       updatePreview();
     };
 
@@ -840,7 +903,7 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
             return;
           }
           draft.templatePath = result.path;
-          await saveDraft();
+          await saveDraft({ refreshCommands: false });
           showError("");
         })
       );
@@ -858,7 +921,7 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
             return;
           }
           draft.destinationRoot = result.path;
-          await saveDraft();
+          await saveDraft({ refreshCommands: false });
           showError("");
         })
       );
@@ -874,7 +937,7 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
             showError("Folder pattern is required.");
             return;
           }
-          await saveDraft();
+          await saveDraft({ refreshCommands: false });
           showError("");
         })
       );
@@ -890,7 +953,7 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
             showError("Filename pattern is required.");
             return;
           }
-          await saveDraft();
+          await saveDraft({ refreshCommands: false });
           showError("");
         })
       );
@@ -905,7 +968,7 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
           .setValue(def.ifExists)
           .onChange(async (value) => {
             draft.ifExists = value;
-            await saveDraft();
+            await saveDraft({ refreshCommands: false });
           })
       );
 
@@ -914,7 +977,7 @@ class FlexibleNotesSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(def.openAfterCreate).onChange(async (value) => {
           draft.openAfterCreate = value;
-          await saveDraft();
+          await saveDraft({ refreshCommands: false });
         })
       );
 
